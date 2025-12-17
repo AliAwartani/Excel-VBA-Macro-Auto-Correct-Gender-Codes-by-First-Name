@@ -1,0 +1,226 @@
+Option Explicit
+
+Public Sub CorrectGendersByFirstName_AutoFindCols()
+    ' Macro to correct gender codes based on the majority gender associated with the first name.
+    ' It automatically finds columns by header name and inserts a new destination column
+    ' next to the source gender column.
+    
+    Dim ws As Worksheet
+    Dim nameCol As Long, srcCol As Long, dstCol As Long
+    Dim title1Col As Long, title2Col As Long
+    
+    ' Temporary variables to hold column indices *before* the insertion
+    Dim srcCol_i As Long, nameCol_i As Long, title1Col_i As Long, title2Col_i As Long
+    Dim insertCol As Long
+    
+    Dim startRow As Long, lastRow As Long
+    Dim namesRange As Range
+    Dim nameDict As Object, counts As Object
+    Dim firstName As String, firstWord As String, code As String, assignedVal As String
+    Dim cell As Range, cellSrc As Range, cellDst As Range, cellT1 As Range, cellT2 As Range
+    
+    Dim prevCalc As XlCalculation
+    Dim prevScreen As Boolean, prevEvents As Boolean, prevAlerts As Boolean
+    
+    On Error GoTo CleanExit
+    
+    Set ws = ActiveSheet
+    startRow = 3
+    
+    ' --- MODIFIED SECTION: Find columns automatically by header name ---
+    Dim headerRow As Long: headerRow = 1 ' Assuming headers are in the first row
+    
+    nameCol_i = FindColumnByHeader(ws, "FIRSTNAM", headerRow)
+    If nameCol_i = 0 Then GoTo CleanExit
+    
+    srcCol_i = FindColumnByHeader(ws, "GENDER", headerRow)
+    If srcCol_i = 0 Then GoTo CleanExit
+    
+    title1Col_i = FindColumnByHeader(ws, "TITLE", headerRow)
+    If title1Col_i = 0 Then GoTo CleanExit
+    
+    title2Col_i = FindColumnByHeader(ws, "TITLECODE", headerRow)
+    If title2Col_i = 0 Then GoTo CleanExit
+    ' --- END OF MODIFIED SECTION ---
+
+    ' 1. Insert the new destination column (Dst = Source + 1)
+    insertCol = srcCol_i + 1
+    
+    ' Speed tweaks (must be applied before inserting column for performance)
+    prevScreen = Application.ScreenUpdating
+    prevEvents = Application.EnableEvents
+    prevCalc = Application.Calculation
+    prevAlerts = Application.DisplayAlerts
+    Application.ScreenUpdating = False
+    Application.EnableEvents = False
+    Application.Calculation = xlCalculationManual
+    Application.DisplayAlerts = False
+    
+    ws.Columns(insertCol).Insert Shift:=xlToRight
+    
+    ' 2. Final assignment and adjustment of column indices (after insertion)
+    srcCol = srcCol_i ' Source column index remains the same
+    dstCol = insertCol ' Destination is the newly inserted column
+    
+    nameCol = nameCol_i
+    title1Col = title1Col_i
+    title2Col = title2Col_i
+    
+    ' Adjustment logic: Any column that was originally at or to the right of the insertion point
+    ' must be incremented by 1.
+    If nameCol >= insertCol Then nameCol = nameCol + 1
+    If title1Col >= insertCol Then title1Col = title1Col + 1
+    If title2Col >= insertCol Then title2Col = title2Col + 1
+    
+    ' Find last row (using the nameCol index, which is now correctly adjusted)
+    lastRow = Application.WorksheetFunction.Max( _
+        ws.Cells(ws.Rows.Count, nameCol).End(xlUp).Row, _
+        ws.Cells(ws.Rows.Count, srcCol).End(xlUp).Row)
+    If lastRow < startRow Then GoTo CleanExit
+    
+    Set namesRange = ws.Range(ws.Cells(startRow, nameCol), ws.Cells(lastRow, nameCol))
+    
+    ' Copy headers from source to destination
+    ws.Range(ws.Cells(1, srcCol), ws.Cells(2, srcCol)).Copy Destination:=ws.Cells(1, dstCol)
+    ws.Cells(1, dstCol).Value = ws.Cells(1, dstCol).Value & " (Corrected)" ' Optional: change header to reflect it's the new corrected column
+    
+    ' Build ignore list
+    Dim ignoreDict As Object
+    Set ignoreDict = CreateObject("Scripting.Dictionary")
+    ignoreDict.CompareMode = vbTextCompare
+    Dim ignoreArr As Variant, itm As Variant
+    ignoreArr = Array("Messrs.", "Messers.", "Rev.", "Modern", "M/S.", "Lady.", _
+        "Office of H.H", "Captain.", "Captain", "Advocate.", "Adv", "Pvt. Dept. Of", _
+        "Pvt", "General.", "General", "M/S", "28", "25", "Lt.", "11", "Office of H.H", _
+        "O.H.H", "Diwan.", "Delegation", "DELG", "31", "Company", "22", "Prince", "16", _
+        "H.H. Dr. Sheikh", "H.H.Dr.", "H.H.", "H.E. Sheikha", "15", "17", "H.H. Prince", _
+        "Pvt. Office Of H.H", "H.E", "Messers")
+    For Each itm In ignoreArr
+        ignoreDict(itm) = True
+    Next itm
+    
+    ' Build dictionary: firstWord -> counts
+    Set nameDict = CreateObject("Scripting.Dictionary")
+    nameDict.CompareMode = vbTextCompare
+    
+    For Each cell In namesRange
+        Set cellT1 = ws.Cells(cell.Row, title1Col)
+        Set cellT2 = ws.Cells(cell.Row, title2Col)
+        
+        ' Skip building counts if ignore title present
+        If ignoreDict.Exists(Trim$(CStr(cellT1.Value2))) Or _
+           ignoreDict.Exists(Trim$(CStr(cellT2.Value2))) Then
+            GoTo SkipCount
+        End If
+        
+        firstName = Trim$(CStr(cell.Value2))
+        If Len(firstName) > 0 Then
+             ' Use Split's built-in functionality for a single delimiter, 0 is the first element
+            firstWord = Split(firstName, " ")(0)
+        Else
+            firstWord = ""
+        End If
+        
+        If Len(firstWord) > 0 Then
+            If Not nameDict.Exists(firstWord) Then
+                Set counts = CreateObject("Scripting.Dictionary")
+                counts.CompareMode = vbTextCompare
+                counts("name") = firstWord
+                counts("1") = 0   ' male
+                counts("2") = 0   ' female
+                counts("0") = 0   ' unknown
+                counts("total") = 0
+                nameDict.Add firstWord, counts
+            End If
+            Set counts = nameDict(firstWord)
+            
+            Set cellSrc = ws.Cells(cell.Row, srcCol)
+            Select Case Trim$(CStr(cellSrc.Value2))
+                Case "1": code = "1"
+                Case "2": code = "2"
+                Case Else: code = "0"
+            End Select
+            
+            counts(code) = counts(code) + 1
+            counts("total") = counts("total") + 1
+        End If
+SkipCount:
+    Next cell
+    
+    ' Apply corrections
+    For Each cell In namesRange
+        Set cellSrc = ws.Cells(cell.Row, srcCol)
+        Set cellDst = ws.Cells(cell.Row, dstCol)
+        Set cellT1 = ws.Cells(cell.Row, title1Col)
+        Set cellT2 = ws.Cells(cell.Row, title2Col)
+        
+        ' Ignore check
+        If ignoreDict.Exists(Trim$(CStr(cellT1.Value2))) Or _
+           ignoreDict.Exists(Trim$(CStr(cellT2.Value2))) Then
+            cellDst.Value2 = cellSrc.Value2
+            GoTo NextRow
+        End If
+        
+        firstName = Trim$(CStr(cell.Value2))
+        If Len(firstName) > 0 Then
+            firstWord = Split(firstName, " ")(0)
+        Else
+            firstWord = ""
+        End If
+        
+        If Len(firstWord) > 0 And nameDict.Exists(firstWord) Then
+            Set counts = nameDict(firstWord)
+            If (counts("1") > 0 Or counts("2") > 0) Then
+                If counts("1") > counts("2") Then
+                    assignedVal = "1"
+                ElseIf counts("2") > counts("1") Then
+                    assignedVal = "2"
+                Else
+                    assignedVal = CStr(cellSrc.Value2) ' tie or only unknowns (which is handled below)
+                End If
+            Else
+                assignedVal = CStr(cellSrc.Value2) ' only unknowns were found for this name
+            End If
+        Else
+            assignedVal = CStr(cellSrc.Value2) ' no usable name or name not found in dictionary
+        End If
+        
+        ' Apply highlighting to the original source column cell if a correction was made
+        If CStr(cellSrc.Value2) <> assignedVal And Len(CStr(cellSrc.Value2)) > 0 Then
+            cellSrc.Interior.Color = RGB(255, 255, 0) ' Yellow highlight
+        End If
+        
+        cellDst.Value2 = assignedVal
+NextRow:
+    Next cell
+    
+    MsgBox "Gender correction complete! A new destination column has been created next to the source column.", vbInformation
+    
+CleanExit:
+    ' Restore settings
+    On Error Resume Next
+    Application.ScreenUpdating = prevScreen
+    Application.EnableEvents = prevEvents
+    Application.Calculation = prevCalc
+    Application.DisplayAlerts = prevAlerts
+    
+    If Err.Number <> 0 Then
+        MsgBox "An error occurred: " & Err.Description, vbCritical, "Error"
+    End If
+End Sub
+
+Private Function FindColumnByHeader(ByVal ws As Worksheet, ByVal headerName As String, ByVal headerRow As Long) As Long
+    ' Helper function to find a column by its header name in a given row
+    Dim foundCell As Range
+    Set foundCell = ws.Rows(headerRow).Find(What:=headerName, LookIn:=xlValues, LookAt:=xlWhole, MatchCase:=False)
+    
+    If Not foundCell Is Nothing Then
+        FindColumnByHeader = foundCell.Column
+    Else
+        MsgBox "Header '" & headerName & "' not found in row " & headerRow & ". Macro will now exit.", vbCritical, "Column Not Found"
+        FindColumnByHeader = 0 ' Return 0 to indicate not found
+    End If
+End Function
+
+
+
